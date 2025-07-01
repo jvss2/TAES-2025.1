@@ -25,14 +25,14 @@ Utilizamos um script que, a partir do código-fonte de um laboratório, gera um 
 
 Análise da documentação gerada por LLM para três laboratórios com níveis de complexidade distintos, visando identificar padrões de omissão (ex: detalhes de configuração, dependências específicas, instruções de instalação).
 
-## 📦 Reprodutibilidade
+<!-- ## 📦 Reprodutibilidade
 
 - Todos os laboratórios utilizados são públicos.
 - O script de geração e o prompt LLM estão neste repositório.
 - Os critérios de avaliação são descritos em um formulário incluído aqui.
-- As instruções para rodar os experimentos estão na seção abaixo.
+- As instruções para rodar os experimentos estão na seção abaixo. -->
 
-## 🛠️ Como Rodar o Script
+<!-- ## 🛠️ Como Rodar o Script
 
 1. Clone este repositório:
 
@@ -71,7 +71,7 @@ Análise da documentação gerada por LLM para três laboratórios com níveis d
 └── resultados/
     ├── tempo_comparativo.csv
     └── analise_qualitativa.md
-```
+``` -->
 
 ## 👥 Equipe
 
@@ -82,5 +82,5 @@ Análise da documentação gerada por LLM para três laboratórios com níveis d
 
 ---
 
-Este projeto é parte da disciplina de Inovação com LLMs e visa explorar contribuições práticas de IA generativa no ciclo de vida do software.
+Este projeto é parte da disciplina de TAES e visa explorar contribuições práticas de IA generativa no ciclo de vida do software.
 
