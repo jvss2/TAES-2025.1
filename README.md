@@ -1,76 +1,81 @@
-# Gerador de Documentação para Novos Laboratórios
+# RAG para Calibração de Confiança em Autocompletadores de Código
 
 ## 🎯 Objetivo
 
-Este projeto propõe o uso de Large Language Models (LLMs) para automatizar a criação de documentação inicial (README.md) de novos laboratórios ou componentes de software. A iniciativa visa melhorar a qualidade da documentação, reduzir o esforço necessário para produzi-la e padronizar a experiência do desenvolvedor (DevEx).
+Investigar um método de RAG (Retrieval-Augmented Generation) mais eficaz para calibrar a confiança de modelos de completamento de código. Resultados preliminares mostram que a seleção inteligente de exemplos — como via BM25 — já melhora significativamente a calibração reflexiva, especialmente quando combinada com reescalonamento. Acreditamos que abordagens baseadas em embeddings semânticos especializados em código podem superar esse baseline.
 
-## 🗉 Atividade do Ciclo de Vida Envolvida
+## 🧩 Atividade do Ciclo de Vida Envolvida
 
-**Documentação de Software** – atividade fundamental para facilitar o uso, manutenção e extensão de sistemas. Este projeto foca em como LLMs podem contribuir para essa tarefa, especialmente em contextos educacionais ou de código aberto, onde a documentação costuma ser negligenciada.
+**Implementação e Evolução de Modelos de Assistência à Programação** — esta atividade envolve melhorar a confiabilidade de ferramentas de autocompletamento de código, com foco em usabilidade, confiança e segurança em ambientes reais.
 
-## 🤖 Proposta com LLM
+## 🤖 Proposta com LLM e RAG
 
-Utilizamos um script que, a partir do código-fonte de um laboratório, gera um rascunho inicial de documentação (README.md). O objetivo é que o desenvolvedor apenas revise e edite esse rascunho, em vez de começar do zero.
+Propomos desenvolver um pipeline RAG com:
+
+- **Embeddings Semânticos Específicos de Código**: Usaremos CodeBERT, GraphCodeBERT ou embeddings treinados in-house.
+- **Re-rankers Neurais**: Para ordenar os exemplos recuperados com base na similaridade contextual real.
+- **Componente de calibração reflexiva**: O modelo será induzido a estimar sua própria confiança após receber sugestões baseadas nos exemplos mais relevantes.
+
+Essa abordagem fornecerá ao modelo instruções mais alinhadas ao problema atual, permitindo julgamentos reflexivos mais confiáveis.
 
 ## 🧪 Experimentos
 
-### Vantagens (Produtividade e Qualidade)
+### Vantagens Esperadas
 
-- **Cenário:** Gerar documentação para um novo laboratório.
-- **Método A (Controle):** Contribuidor escreve README.md do zero.
-- **Método B (Experimental):** O mesmo contribuidor usa o script com LLM para gerar um rascunho e edita o texto.
-- **Métricas:** Tempo total gasto e avaliação qualitativa da documentação final (clareza, cobertura, organização).
+- **Cenário:** Completamento de código com suporte a calibragem reflexiva.
+- **Método A (Controle):** RAG com BM25 e sem re-rankers.
+- **Método B (Proposto):** RAG com embeddings especializados e re-rankers.
+- **Métricas:** ECE (Expected Calibration Error), cobertura, F1 do completamento, acurácia da autoconfiança.
 
-### Limitações (Completude)
+<!-- ### Limitações Investigadas
 
-Análise da documentação gerada por LLM para três laboratórios com níveis de complexidade distintos, visando identificar padrões de omissão (ex: detalhes de configuração, dependências específicas, instruções de instalação).
+- Robustez a exemplos ruidosos no repositório.
+- Dependência da qualidade dos embeddings.
+- Custo computacional adicional do re-ranking.
 
-<!-- ## 📦 Reprodutibilidade
+## 📦 Reprodutibilidade
 
-- Todos os laboratórios utilizados são públicos.
-- O script de geração e o prompt LLM estão neste repositório.
-- Os critérios de avaliação são descritos em um formulário incluído aqui.
-- As instruções para rodar os experimentos estão na seção abaixo. -->
+- Usaremos datasets públicos (ex: HumanEval, CodeXGLUE).
+- Embeddings e repositórios base serão documentados.
+- Scripts de recuperação, re-ranking e avaliação serão versionados.
 
-<!-- ## 🛠️ Como Rodar o Script
+## 🛠️ Como Rodar o Pipeline (exemplo futuro)
 
 1. Clone este repositório:
 
    ```bash
-   git clone https://github.com/jvss2/gerador-documentacao-labs.git
-   cd gerador-documentacao-labs
+   git clone https://github.com/jvss2/rag-calibracao-codigo.git
+   cd rag-calibracao-codigo
    ```
 
-2. Instale as dependências (exemplo para Python):
+2. Instale as dependências:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Execute o script de geração:
+3. Execute o pipeline:
 
    ```bash
-   python gerar_documentacao.py --path ./laboratorios/lab1
+   python run_pipeline.py --dataset humaneval
    ```
-
-4. O rascunho será salvo como `README_GERADO.md` no diretório do laboratório.
 
 ## 📁 Estrutura do Repositório
 
 ```
 .
 ├── README.md
-├── gerar_documentacao.py
-├── prompt.txt
-├── avaliacao/
-│   └── formulario.md
-├── laboratorios/
-│   ├── lab1/
-│   ├── lab2/
-│   └── lab3/
+├── run_pipeline.py
+├── embeddings/
+│   └── codebert/
+├── retrieval/
+│   ├── bm25.py
+│   └── reranker.py
+├── evaluation/
+│   └── metrics.py
 └── resultados/
-    ├── tempo_comparativo.csv
-    └── analise_qualitativa.md
+    ├── ece_comparativo.csv
+    └── analise_qualidade.md
 ``` -->
 
 ## 👥 Equipe
@@ -82,5 +87,5 @@ Análise da documentação gerada por LLM para três laboratórios com níveis d
 
 ---
 
-Este projeto é parte da disciplina de TAES e visa explorar contribuições práticas de IA generativa no ciclo de vida do software.
+Este projeto é parte da disciplina de Inovação com LLMs e busca ampliar a segurança e aplicabilidade de modelos generativos para assistentes de programação.
 
