@@ -27,6 +27,9 @@ Essa abordagem fornecerá ao modelo instruções mais alinhadas ao problema atua
 - **Método B (Proposto):** RAG com embeddings especializados e re-rankers.
 - **Métricas:** ECE (Expected Calibration Error), cobertura, F1 do completamento, acurácia da autoconfiança.
 
+## Link para os datasets:
+
+- https://drive.google.com/drive/folders/1QyUIONLrvpKhMGKn4JEHBtdq_4ylotDx?usp=sharing
 <!-- ### Limitações Investigadas
 
 - Robustez a exemplos ruidosos no repositório.
