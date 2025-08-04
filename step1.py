@@ -76,7 +76,8 @@ class PredictionResult:
     context: str
     original_line: str
     predicted_line: str
-    confidence: float
+    pavg: float
+    ptot: float
     is_correct: bool
     
     def to_dict(self) -> Dict[str, Any]:
