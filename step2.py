@@ -1,248 +1,362 @@
+import os
 import re
+import json
 import faiss
 import torch
-import openai
 import random
+import logging
 import numpy as np
-import pandas as pd
 from typing import List
-import matplotlib.pyplot as plt
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
 
-def avaliar_reflexao(completion, context, passou_testes, selector=None, modelo="openai", modelo_args=None):
-    """
-    Avalia reflexão sobre uma completion usando o modelo especificado.
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+class ModelManager:
+    def __init__(self):
+        self.hf_tokenizer = None
+        self.hf_model = None
+        self.rag_model = None
+        self.rag_index = None
+        self.rag_code_tokenizer = None
+        self.rag_code_model = None
+        self.rag_code_index = None
+        self.bm25_model = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"ModelManager initialized with device: {self.device}")
     
-    modelo: "openai" ou "hf"
-    modelo_args: dicionário com parâmetros extras (ex: tokenizer, caminho do modelo, etc)
-    """
-    prompt = montar_prompt_reflexivo(context, completion, selector)
+    def load_hf_model(self, model_path: str = "deepseek-ai/deepseek-coder-1.3b-base"):
+        if self.hf_tokenizer is None or self.hf_model is None:
+            logger.info(f"Loading HF model: {model_path}")
+            self.hf_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            self.hf_model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True).to(self.device)
+            logger.info("HF model loaded successfully")
+        return self.hf_tokenizer, self.hf_model
+    
+    def load_rag_model(self, model_name: str = "all-MiniLM-L6-v2"):
+        if self.rag_model is None:
+            logger.info(f"Loading RAG model: {model_name}")
+            self.rag_model = SentenceTransformer(model_name)
+            logger.info("RAG model loaded successfully")
+        return self.rag_model
+    
+    def load_rag_code_model(self, model_name: str = "microsoft/codebert-base"):
+        if self.rag_code_tokenizer is None or self.rag_code_model is None:
+            logger.info(f"Loading RAG code model: {model_name}")
+            self.rag_code_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.rag_code_model = AutoModel.from_pretrained(model_name)
+            self.rag_code_model.eval()
+            logger.info("RAG code model loaded successfully")
+        return self.rag_code_tokenizer, self.rag_code_model
 
-    if modelo == "openai":
-        return avaliar_reflexao_openai(prompt, completion, context, passou_testes, **(modelo_args or {}))
-    elif modelo == "hf":
-        return avaliar_reflexao_hf(prompt, completion, context, passou_testes, **(modelo_args or {}))
-    else:
-        raise ValueError(f"Modelo não suportado: {modelo}")
+model_manager = ModelManager()
 
-def montar_prompt_reflexivo(context: str, completion: str, selector=None) -> str:
-    few_shot_exemplos = selector(context, completion) if selector else []
+def preparar_index_rag(dataset_slice):
+    logger.info(f"Preparing optimized RAG index for {len(dataset_slice)} samples")
+    model = model_manager.load_rag_model()
+    contexts = [ex["context"] + "\n" + ex["predicted_line"] for ex in dataset_slice]
+    
+    logger.info(f"Encoding {len(contexts)} contexts for RAG")
+    embeddings = model.encode(contexts, convert_to_numpy=True, show_progress_bar=True)
+    logger.info(f"Generated embeddings shape: {embeddings.shape}")
+
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+    logger.info("Optimized RAG index prepared successfully")
+    return index
+
+def preparar_index_rag_code(dataset_slice):
+    logger.info(f"Preparing optimized RAG code index for {len(dataset_slice)} samples")
+    tokenizer, model = model_manager.load_rag_code_model()
+
+    contexts = [ex["context"] + "\n" + ex["predicted_line"] for ex in dataset_slice]
+    embeddings = []
+    logger.info(f"Encoding {len(contexts)} contexts for RAG code")
+
+    batch_size = 8
+    with torch.no_grad():
+        for i in range(0, len(contexts), batch_size):
+            batch = contexts[i:i+batch_size]
+            if i % (batch_size * 4) == 0:
+                logger.debug(f"Encoded {i}/{len(contexts)} contexts")
+            
+            for text in batch:
+                inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+                outputs = model(**inputs)
+                cls_embedding = outputs.last_hidden_state[0][0].numpy()
+                embeddings.append(cls_embedding)
+
+    embeddings = np.vstack(embeddings)
+    logger.info(f"Generated code embeddings shape: {embeddings.shape}")
+
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+    logger.info("Optimized RAG code index prepared successfully")
+    return index
+
+def preparar_bm25(dataset_slice):
+    logger.info(f"Preparing optimized BM25 for {len(dataset_slice)} samples")
+    corpus = [re.findall(r"\w+", (ex["context"] + "\n" + ex["predicted_line"]).lower()) for ex in dataset_slice]
+    bm25 = BM25Okapi(corpus)
+    logger.info("Optimized BM25 prepared successfully")
+    return bm25
+
+def montar_prompt_reflexivo(context: str, predicted_line: str, selector=None) -> str:
+    logger.debug("Building reflective prompt")
+    few_shot_exemplos = selector(context, predicted_line) if selector else []
+    logger.debug(f"Selected {len(few_shot_exemplos)} few-shot examples")
 
     prompt_parts = []
 
-    for exemplo in few_shot_exemplos:
+    for i, exemplo in enumerate(few_shot_exemplos):
         prompt_parts.append(
-            f"{exemplo['context']}\n{exemplo['completion']}\nReflexão: {exemplo['reflexao']}"
+            f"{exemplo['context']}\n{exemplo['predicted_line']}\nReflexão: {exemplo['reflexao']}"
         )
 
     prompt_parts.append("---")
     if not few_shot_exemplos:
         prompt_parts.append("Is the code below correct? Answer only with True or False.\n")
 
-    prompt_parts.append(f"{context}\n{completion}\nReflexão:")
+    prompt_parts.append(f"{context}\n{predicted_line}\nReflexão:")
+    
+    final_prompt = "\n\n".join(prompt_parts)
+    logger.debug(f"Final reflective prompt length: {len(final_prompt)} characters")
+    
+    return final_prompt
 
-    return "\n\n".join(prompt_parts)
+def montar_prompt_verbalized(context: str, predicted_line: str, selector=None) -> str:
+    """Prompt para Verbalized Self-Ask (pv)"""
+    logger.debug("Building verbalized self-ask prompt")
+    few_shot_exemplos = selector(context, predicted_line) if selector else []
+    logger.debug(f"Selected {len(few_shot_exemplos)} few-shot examples for verbalized prompt")
 
-def selector_random(context, completion):
-    exemplos = random.sample(dataset, k_shots)
-    return [
-        {
-            "context": ex["context"],
-            "completion": ex["completion"],
-            "reflexao": "True" if ex["passou_testes"] else "False"
-        }
-        for ex in exemplos
-    ]
+    prompt_parts = []
 
-def selector_bm25(context, completion):
-    # Preprocessa e indexa
-    corpus = [re.findall(r"\w+",  (ex["context"] + "\n" + ex["completion"]).lower()) for ex in dataset]
-    bm25 = BM25Okapi(corpus)
-    query = re.findall(r"\w+", (context + "\n" + completion).lower())
-    scores = bm25.get_scores(query)
+    for i, exemplo in enumerate(few_shot_exemplos):
+        confidence_score = 0.8 if exemplo['reflexao'] == "True" else 0.2
+        prompt_parts.append(
+            f"{exemplo['context']}\n{exemplo['predicted_line']}\nConfiança: {confidence_score}"
+        )
 
-    # Top-k índices mais relevantes
-    top_k_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k_shots]
-    return [
-        {
-            "context": dataset[i]["context"],
-            "completion": dataset[i]["completion"],
-            "reflexao": "True" if dataset[i]["passou_testes"] else "False"
-        }
-        for i in top_k_indices
-    ]
+    prompt_parts.append("---")
+    if not few_shot_exemplos:
+        prompt_parts.append("Rate your confidence in the correctness of the code below on a scale from 0.0 to 1.0:\n")
 
-def preparar_index_rag():
-    model = SentenceTransformer(RAG_model_name)
-    contexts = [ex["context"] + "\n" + ex["completion"] for ex in dataset]
-    embeddings = model.encode(contexts, convert_to_numpy=True)
+    prompt_parts.append(f"{context}\n{predicted_line}\nConfiança:")
+    
+    final_prompt = "\n\n".join(prompt_parts)
+    logger.debug(f"Final verbalized prompt length: {len(final_prompt)} characters")
 
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(embeddings)
-    return index, model
+    return final_prompt
 
-def selector_rag(context, completion):
-    query_text = context + "\n" + completion
-    query_vec = RAG_model.encode([query_text])[0].reshape(1, -1)
-    _, I = RAG_index.search(query_vec, k_shots)
-    return [
-        {
-            "context": dataset[i]["context"],
-            "completion": dataset[i]["completion"],
-            "reflexao": "True" if dataset[i]["passou_testes"] else "False"
-        }
-        for i in I[0]
-    ]
+class SelectorManager:
+    def __init__(self, dataset_slice, k_shots):
+        self.dataset_slice = dataset_slice
+        self.k_shots = k_shots
+        self.rag_index = None
+        self.rag_code_index = None
+        self.bm25_model = None
+        
+    def setup_rag(self):
+        if self.rag_index is None:
+            self.rag_index = preparar_index_rag(self.dataset_slice)
+    
+    def setup_rag_code(self):
+        if self.rag_code_index is None:
+            self.rag_code_index = preparar_index_rag_code(self.dataset_slice)
+    
+    def setup_bm25(self):
+        if self.bm25_model is None:
+            self.bm25_model = preparar_bm25(self.dataset_slice)
 
-def preparar_index_rag_code():
-    tokenizer = AutoTokenizer.from_pretrained(RAG_code_model_name)
-    model = AutoModel.from_pretrained(RAG_code_model_name)
-    model.eval()
+    def selector_random(self, context, predicted_line):
+        logger.debug(f"Using random selector with k_shots={self.k_shots}")
+        exemplos = random.sample(self.dataset_slice, min(self.k_shots, len(self.dataset_slice)))
+        return [
+            {
+                "context": ex["context"],
+                "predicted_line": ex["predicted_line"],
+                "reflexao": "True" if ex["is_correct"] else "False"
+            }
+            for ex in exemplos
+        ]
 
-    contexts = [ex["context"] + "\n" + ex["completion"] for ex in dataset]
-    embeddings = []
+    def selector_bm25(self, context, predicted_line):
+        logger.debug(f"Using BM25 selector with k_shots={self.k_shots}")
+        self.setup_bm25()
+        
+        query = re.findall(r"\w+", (context + "\n" + predicted_line).lower())
+        scores = self.bm25_model.get_scores(query)
+        top_k_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:self.k_shots]
+        
+        return [
+            {
+                "context": self.dataset_slice[i]["context"],
+                "predicted_line": self.dataset_slice[i]["predicted_line"],
+                "reflexao": "True" if self.dataset_slice[i]["is_correct"] else "False"
+            }
+            for i in top_k_indices
+        ]
 
-    with torch.no_grad():
-        for text in contexts:
-            inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    def selector_rag_code(self, context, predicted_line):
+        logger.debug(f"Using RAG code selector with k_shots={self.k_shots}")
+        self.setup_rag_code()
+        
+        tokenizer, model = model_manager.load_rag_code_model()
+        query_text = context + "\n" + predicted_line
+        inputs = tokenizer(query_text, return_tensors="pt", truncation=True, max_length=512)
+        
+        with torch.no_grad():
             outputs = model(**inputs)
-            # CLS token como embedding
-            cls_embedding = outputs.last_hidden_state[0][0].numpy()
-            embeddings.append(cls_embedding)
+            query_embedding = outputs.last_hidden_state[0][0].numpy().reshape(1, -1)
 
-    embeddings = np.vstack(embeddings)
+        _, I = self.rag_code_index.search(query_embedding, self.k_shots)
+        
+        return [
+            {
+                "context": self.dataset_slice[i]["context"],
+                "predicted_line": self.dataset_slice[i]["predicted_line"],
+                "reflexao": "True" if self.dataset_slice[i]["is_correct"] else "False"
+            }
+            for i in I[0]
+        ]
 
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(embeddings)
-    return index, tokenizer, model
+def avaliar_verbalized_hf(
+    prompt: str,
+    predicted_line: str,
+    context: str,
+    is_correct: bool
+):
+    logger.debug("Evaluating verbalized self-ask (optimized)")
+    
+    tokenizer, model = model_manager.load_hf_model()
+    inputs = tokenizer(prompt, return_tensors="pt").to(model_manager.device)
 
-def selector_rag_code(context, completion):
-    query_text = context + "\n" + completion
-    inputs = RAG_code_tokenizer(query_text, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
-        outputs = RAG_code_model(**inputs)
-        query_embedding = outputs.last_hidden_state[0][0].numpy().reshape(1, -1)
+        output = model.generate(
+            inputs["input_ids"],
+            max_new_tokens=5,
+            return_dict_in_generate=True,
+            output_scores=True,
+            temperature=0.0,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id
+        )
 
-    _, I = RAG_code_index.search(query_embedding, k_shots)
-
-    return [
-        {
-            "context": dataset[i]["context"],
-            "completion": dataset[i]["completion"],
-            "reflexao": "True" if dataset[i]["passou_testes"] else "False"
-        }
-        for i in I[0]
-    ]
-
-def avaliar_reflexao_openai(prompt, completion, context, passou_testes, model="text-davinci-003", api_key=None):
-    if api_key:
-        openai.api_key = api_key
-
-    response = openai.Completion.create(
-        model=model,
-        prompt=prompt,
-        temperature=0,
-        max_tokens=1,
-        logprobs=5,
-        echo=False,
-    )
-
-    choice = response["choices"][0]
-    token = choice["text"].strip()
-    logprobs = choice["logprobs"]["top_logprobs"][0]
-
-    logprob_true = logprobs.get("True", -float("inf"))
-    logprob_false = logprobs.get("False", -float("inf"))
-
-    prob_true = np.exp(logprob_true)
-    prob_false = np.exp(logprob_false)
-    pnb = prob_true / (prob_true + prob_false) if (prob_true + prob_false) > 0 else 0.5
-
-    reflexao_binaria = "True" if "true" in token.lower() else "False" if "false" in token.lower() else "Unknown"
+    generated_text = tokenizer.decode(output.sequences[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    logger.debug(f"Generated: '{generated_text}'")
+    
+    match = re.search(r'(\d+\.?\d*)', generated_text.strip())
+    if match:
+        try:
+            pv = float(match.group(1))
+            if pv > 1.0:
+                pv = pv / 10.0 if pv <= 10.0 else 1.0
+            logger.debug(f"Extracted pv: {pv}")
+        except:
+            pv = 0.5
+    else:
+        pv = 0.5
 
     return {
-        "prompt": prompt,
-        "resposta": reflexao_binaria,
-        "p_true": pnb,
-        "passou_testes": passou_testes,
-        "completion": completion,
-        "context": context,
-        "token": token,
-        "logprob_true": logprob_true,
-        "logprob_false": logprob_false
+        "pv": pv,
+        "generated_text": generated_text,
+        "is_correct": is_correct
     }
 
 def avaliar_reflexao_hf(
     prompt: str,
-    completion: str,
+    predicted_line: str,
     context: str,
-    passou_testes: bool,
-    model_path: str = "tiiuae/falcon-7b-instruct",
-    tokenizer=None,
-    model=None,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    is_correct: bool
 ):
-    """
-    Avalia a reflexão usando um modelo HuggingFace.
+    logger.debug("Evaluating question answering logits (optimized)")
     
-    Retorna a resposta binária, pNB, e informações úteis.
-    """
-    print(prompt)
+    tokenizer, model = model_manager.load_hf_model()
+    inputs = tokenizer(prompt, return_tensors="pt").to(model_manager.device)
 
-    # Carrega tokenizer e modelo, se não fornecidos
-    if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    if model is None:
-        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True).to(device)
-
-    # Tokenização
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-
-    # Geração com logprobs
     with torch.no_grad():
         output = model.generate(
             inputs["input_ids"],
             max_new_tokens=1,
             return_dict_in_generate=True,
             output_scores=True,
-            temperature=0.0
+            temperature=0.0,
+            pad_token_id=tokenizer.eos_token_id
         )
 
-    # Token gerado
     generated_token_id = output.sequences[0][-1].item()
     generated_token = tokenizer.decode(generated_token_id).strip()
+    scores = output.scores[0][0]
 
-    # Score do próximo token
-    scores = output.scores[0][0]  # logits da primeira posição gerada
+    true_variations = ["True", " True", "true", " true"]
+    false_variations = ["False", " False", "false", " false"]
+    
+    true_logprobs = []
+    false_logprobs = []
+    
+    for var in true_variations:
+        token_id = tokenizer.convert_tokens_to_ids(var)
+        if token_id is not None and token_id != tokenizer.unk_token_id:
+            true_logprobs.append(scores[token_id].item())
+    
+    for var in false_variations:
+        token_id = tokenizer.convert_tokens_to_ids(var)
+        if token_id is not None and token_id != tokenizer.unk_token_id:
+            false_logprobs.append(scores[token_id].item())
 
-    # Verifica se o vocabulário tem os tokens "True" e "False"
     true_id = tokenizer.convert_tokens_to_ids("True")
-    false_id = tokenizer.convert_tokens_to_ids("False")
+    all_probs = torch.softmax(scores, dim=0)
+    pB = all_probs[true_id].item() if true_id is not None else 0.0
 
-    logprob_true = scores[true_id].item() if true_id is not None else -float("inf")
-    logprob_false = scores[false_id].item() if false_id is not None else -float("inf")
+    if true_logprobs and false_logprobs:
+        max_true_logprob = max(true_logprobs)
+        max_false_logprob = max(false_logprobs)
+        prob_true = np.exp(max_true_logprob)
+        prob_false = np.exp(max_false_logprob)
+        pNB = prob_true / (prob_true + prob_false)
+    else:
+        pNB = 0.5
 
-    # Normalização
-    prob_true = np.exp(logprob_true)
-    prob_false = np.exp(logprob_false)
-    pnb = prob_true / (prob_true + prob_false) if (prob_true + prob_false) > 0 else 0.5
-
-    # Interpretação do token
     resposta_binaria = "True" if "true" in generated_token.lower() else "False" if "false" in generated_token.lower() else "Unknown"
-    print(pnb, resposta_binaria)
 
     return {
-        "prompt": prompt,
         "resposta": resposta_binaria,
-        "p_true": pnb,
-        "passou_testes": passou_testes,
-        "completion": completion,
+        "pB": pB,
+        "pNB": pNB,
+        "is_correct": is_correct,
+        "predicted_line": predicted_line,
         "context": context,
-        "token": generated_token,
-        "logprob_true": logprob_true,
-        "logprob_false": logprob_false
+        "token": generated_token
+    }
+
+def avaliar_todas_metricas(predicted_line, context, is_correct, pavg, ptot, selector=None):
+    logger.debug("Starting optimized comprehensive metric evaluation")
+    
+    prompt_pv = montar_prompt_verbalized(context, predicted_line, selector)
+    result_pv = avaliar_verbalized_hf(prompt_pv, predicted_line, context, is_correct)
+    
+    prompt_tf = montar_prompt_reflexivo(context, predicted_line, selector)
+    result_tf = avaliar_reflexao_hf(prompt_tf, predicted_line, context, is_correct)
+    
+    return {
+        "context": context,
+        "predicted_line": predicted_line,
+        "pavg": pavg,
+        "ptot": ptot,
+        "pv": result_pv["pv"],
+        "ask_tf": result_tf["pB"],
+        "ask_tf_n": result_tf["pNB"],
+        "is_correct": is_correct
     }
 
 def brier_score(y_true: List[int], y_prob: List[float]) -> float:
@@ -270,145 +384,107 @@ def expected_calibration_error(y_true: List[int], y_prob: List[float], n_bins: i
             ece += (bin_size / total) * abs(acc - conf)
     return ece
 
+if __name__ == "__main__":
+    logger.info("Starting optimized main execution")
 
-dataset = [
-    {
-        "context": "def add(a, b):\n    # Soma dois números\n    ",
-        "completion": "return a + b",
-        "passou_testes": True
-    },
-    {
-        "context": "def divide(a, b):\n    # Retorna a divisão\n    if b == 0:\n        ",
-        "completion": "raise ValueError('Divisão por zero')",
-        "passou_testes": True
-    },
-    {
-        "context": "def get_first(lst):\n    # Retorna o primeiro elemento de uma lista\n    ",
-        "completion": "return lst[0]",
-        "passou_testes": True
-    },
-    {
-        "context": "def invert_case(s):\n    # Inverte maiúsculas e minúsculas\n    ",
-        "completion": "return s.swapcase()",
-        "passou_testes": True
-    },
-    {
-        "context": "def add(a, b):\n    # Soma dois números\n    ",
-        "completion": "return a - b",  # Errado propositalmente
-        "passou_testes": False
-    },
-    {
-        "context": "def square_elements(lst):\n    # Retorna uma nova lista com os elementos ao quadrado\n    ",
-        "completion": "return [x ** 2 for x in lst]",
-        "passou_testes": True
-    },
-    {
-        "context": "def is_palindrome(s):\n    # Verifica se a string é um palíndromo\n    ",
-        "completion": "return s == s[::-1]",
-        "passou_testes": True
-    },
-    {
-        "context": "def get_even_numbers(nums):\n    # Filtra números pares\n    ",
-        "completion": "return [n for n in nums if n % 2 == 0]",
-        "passou_testes": True
-    },
-    {
-        "context": "def multiply(a, b):\n    # Multiplica dois números\n    ",
-        "completion": "return a + b",  # incorreto propositalmente
-        "passou_testes": False
-    },
-    {
-        "context": "def get_last(lst):\n    # Retorna o último elemento da lista\n    ",
-        "completion": "return lst[-1]",
-        "passou_testes": True
-    }
-]
+    file_path = "results/deepseek_predictions.json"
+    logger.info(f"Loading dataset from: {file_path}")
+    
+    with open(file_path, 'r', encoding='utf-8') as f:
+        dataset = json.load(f)
 
-k_shots = 3
-selector = selector_rag_code
-RAG_model_code = False
-if selector == selector_rag:
-    RAG_model_name = "all-MiniLM-L6-v2"
-    RAG_index, RAG_model = preparar_index_rag()
-if selector == selector_rag_code:
-    RAG_code_model_name = "microsoft/codebert-base"
-    RAG_code_index, RAG_code_tokenizer, RAG_code_model = preparar_index_rag_code()
+    logger.info(f"Dataset loaded: {len(dataset)}")
 
-# Rodar reflexão sobre todos os exemplos
-avaliacoes = [
-    avaliar_reflexao(
-        completion=ex["completion"],
-        context=ex["context"],
-        passou_testes=ex["passou_testes"],
-        selector=selector,  
-        modelo="hf",
-        modelo_args={"model_path": "Salesforce/codegen-350M-mono"}
-        # modelo_args={"api_key": "sua_chave"}
-    )
-    for ex in dataset
-]
-#"tiiuae/falcon-7b-instruct", "Salesforce/codegen-350M-mono", "TheBloke/WizardCoder‑Python‑7B‑V1.0‑AWQ", 
+    k_shots = 5
+    logger.info(f"k_shots set to: {k_shots}")
 
-df_resultados = pd.DataFrame([
-    {
-        "y_prob": av["p_true"].astype(int),
-        "y_true": av["passou_testes"],
-    }
-    for av in avaliacoes
-])
+    selectors_config = [
+        ("0_shot", None),
+        ("fs_random", "random"),
+        ("fs_bm25", "bm25"),
+        ("rag", "rag_code")
+    ]
 
-y_true = df_resultados["y_true"].tolist()
-y_prob = df_resultados["y_prob"].tolist()
+    logger.info(f"Testing {len(selectors_config)} selector configurations")
 
-brier = brier_score(y_true, y_prob)
-skill = skill_score(y_true, y_prob)
-ece = expected_calibration_error(y_true, y_prob)
+    for selector_idx, (selector_name, selector_type) in enumerate(selectors_config):
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Testing configuration {selector_idx+1}/{len(selectors_config)}: {selector_name}")
+        logger.info(f"{'='*50}")
+        
+        current_k_shots = 0 if selector_name == "0_shot" else k_shots
+        
+        if selector_type:
+            selector_manager = SelectorManager(dataset, current_k_shots)
+            if selector_type == "random":
+                selector_func = selector_manager.selector_random
+            elif selector_type == "bm25":
+                selector_func = selector_manager.selector_bm25
+            elif selector_type == "rag_code":
+                selector_func = selector_manager.selector_rag_code
+        else:
+            selector_func = None
+        
+        all_results = []
+        
+        logger.info(f"Processing {len(dataset)} samples...")
+        for i, ex in enumerate(dataset):
+            if i % 2 == 0:
+                logger.info(f"Processing sample {i+1}/{len(dataset)}")
+            
+            result = avaliar_todas_metricas(
+                predicted_line=ex["predicted_line"],
+                context=ex["context"],
+                is_correct=ex["is_correct"],
+                pavg=ex["pavg"],
+                ptot=ex["ptot"],
+                selector=selector_func
+            )
+            result["sample_id"] = ex.get("sample_id", i)
+            all_results.append(result)
+        
+        output_filename = f"plots_mini/confidence_results_{selector_name}.json"
+        logger.info(f"Saving results to: {output_filename}")
+        if os.path.exists(output_filename):
+            with open(output_filename, 'r', encoding='utf-8') as f:
+                try:
+                    existing_results = json.load(f)
+                    if not isinstance(existing_results, list):
+                        logger.warning("Existing results are not a list. Overwriting.")
+                        existing_results = []
+                except json.JSONDecodeError:
+                    logger.warning("Could not decode existing JSON. Overwriting.")
+                    existing_results = []
+        else:
+            existing_results = []
 
-print("\nMétricas de Calibração:")
-print(f"- Brier Score: {brier:.4f}")
-print(f"- Skill Score: {skill:.4f}")
-print(f"- Expected Calibration Error (ECE): {ece:.4f}")
+        combined_results = existing_results + all_results
 
-with open(f"metricas_calibracao_{selector}.txt", "w") as f:
-    f.write(f"Brier Score: {brier:.4f}\n")
-    f.write(f"Skill Score: {skill:.4f}\n")
-    f.write(f"Expected Calibration Error (ECE): {ece:.4f}\n")
+        with open(output_filename, 'w', encoding='utf-8') as f:
+            json.dump(combined_results, f, indent=2, ensure_ascii=False)
 
-def plot_calibration_with_hist(y_true, y_prob, n_bins=10, filename="calibration_plot_hist.png"):
-    y_true = np.array(y_true)
-    y_prob = np.array(y_prob)
-    bin_bounds = np.linspace(0, 1, n_bins + 1)
+        logger.info(f"Total results now stored: {len(combined_results)}")
+        
+        y_true = [r["is_correct"] for r in all_results]
+        y_prob_pnb = [r["ask_tf_n"] for r in all_results]
+        
+        brier = brier_score(y_true, y_prob_pnb)
+        skill = skill_score(y_true, y_prob_pnb)
+        ece = expected_calibration_error(y_true, y_prob_pnb)
+        
+        logger.info(f"\n=== Calibration Metrics for {selector_name} (using pNB) ===")
+        logger.info(f"- Brier Score: {brier:.4f}")
+        logger.info(f"- Skill Score: {skill:.4f}")
+        logger.info(f"- Expected Calibration Error (ECE): {ece:.4f}")
+        
+        metrics_filename = f"metricas_calibracao_{selector_name}.txt"
+        with open(metrics_filename, "w") as f:
+            f.write(f"Brier Score: {brier:.4f}\n")
+            f.write(f"Skill Score: {skill:.4f}\n")
+            f.write(f"Expected Calibration Error (ECE): {ece:.4f}\n")
+        
+        logger.info(f"Configuration {selector_name} completed successfully")
 
-    accs, confs, counts = [], [], []
-
-    for i in range(n_bins):
-        low, high = bin_bounds[i], bin_bounds[i+1]
-        in_bin = (y_prob >= low) & (y_prob < high)
-        if in_bin.any():
-            accs.append(np.mean(y_true[in_bin]))
-            confs.append(np.mean(y_prob[in_bin]))
-            counts.append(np.sum(in_bin))
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8), gridspec_kw={'height_ratios': [3, 1]})
-
-    # Calibração
-    ax1.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Ideal')
-    ax1.plot(confs, accs, marker='o', label='Modelo')
-    ax1.set_ylabel("Frequência real de acerto")
-    ax1.set_xticks(np.linspace(0, 1, n_bins + 1))
-    ax1.set_title("Gráfico de Calibração com Histograma")
-    ax1.grid(True)
-    ax1.legend()
-
-    # Histograma
-    bin_centers = (bin_bounds[:-1] + bin_bounds[1:]) / 2
-    ax2.bar(bin_centers, counts, width=1/n_bins, align='center', edgecolor='black')
-    ax2.set_xlabel("Confiança prevista (p_true)")
-    ax2.set_ylabel("Contagem")
-    ax2.grid(True)
-
-    plt.tight_layout()
-    plt.savefig(filename)
-    plt.close()
-
-plot_calibration_with_hist(y_true, y_prob, filename=f"calibration_plot_{selector}.png")
+    logger.info(f"\n{'='*50}")
+    logger.info("Processing completed successfully!")
+    logger.info(f"{'='*50}")
