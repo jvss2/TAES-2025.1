@@ -22,10 +22,8 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
-# Initialize logger
 logger = setup_logging()
 
-# ===== CLASSE PARA GERENCIAR MODELOS (NOVO) =====
 class ModelManager:
     """Gerencia carregamento único de modelos"""
     def __init__(self):
@@ -41,7 +39,6 @@ class ModelManager:
         logger.info(f"ModelManager initialized with device: {self.device}")
     
     def load_hf_model(self, model_path: str = "deepseek-ai/deepseek-coder-1.3b-base"):
-        """Carrega modelo HF uma única vez"""
         if self.hf_tokenizer is None or self.hf_model is None:
             logger.info(f"Loading HF model: {model_path}")
             self.hf_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -50,7 +47,6 @@ class ModelManager:
         return self.hf_tokenizer, self.hf_model
     
     def load_rag_model(self, model_name: str = "all-MiniLM-L6-v2"):
-        """Carrega modelo RAG uma única vez"""
         if self.rag_model is None:
             logger.info(f"Loading RAG model: {model_name}")
             self.rag_model = SentenceTransformer(model_name)
@@ -58,7 +54,6 @@ class ModelManager:
         return self.rag_model
     
     def load_rag_code_model(self, model_name: str = "microsoft/codebert-base"):
-        """Carrega modelo RAG code uma única vez"""
         if self.rag_code_tokenizer is None or self.rag_code_model is None:
             logger.info(f"Loading RAG code model: {model_name}")
             self.rag_code_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -67,11 +62,9 @@ class ModelManager:
             logger.info("RAG code model loaded successfully")
         return self.rag_code_tokenizer, self.rag_code_model
 
-# Instância global do gerenciador
 model_manager = ModelManager()
 
-# ===== PREPARAÇÃO DE ÍNDICES OTIMIZADA =====
-def preparar_index_rag_otimizado(dataset_slice):
+def preparar_index_rag(dataset_slice):
     """Prepara índice RAG apenas para o slice usado"""
     logger.info(f"Preparing optimized RAG index for {len(dataset_slice)} samples")
     model = model_manager.load_rag_model()
@@ -86,8 +79,7 @@ def preparar_index_rag_otimizado(dataset_slice):
     logger.info("Optimized RAG index prepared successfully")
     return index
 
-def preparar_index_rag_code_otimizado(dataset_slice):
-    """Prepara índice RAG code apenas para o slice usado"""
+def preparar_index_rag_code(dataset_slice):
     logger.info(f"Preparing optimized RAG code index for {len(dataset_slice)} samples")
     tokenizer, model = model_manager.load_rag_code_model()
 
@@ -95,7 +87,6 @@ def preparar_index_rag_code_otimizado(dataset_slice):
     embeddings = []
     logger.info(f"Encoding {len(contexts)} contexts for RAG code")
 
-    # OTIMIZAÇÃO: Processamento em batches
     batch_size = 8
     with torch.no_grad():
         for i in range(0, len(contexts), batch_size):
@@ -117,7 +108,7 @@ def preparar_index_rag_code_otimizado(dataset_slice):
     logger.info("Optimized RAG code index prepared successfully")
     return index
 
-def preparar_bm25_otimizado(dataset_slice):
+def preparar_bm25(dataset_slice):
     """Prepara BM25 apenas para o slice usado"""
     logger.info(f"Preparing optimized BM25 for {len(dataset_slice)} samples")
     corpus = [re.findall(r"\w+", (ex["context"] + "\n" + ex["predicted_line"]).lower()) for ex in dataset_slice]
@@ -125,7 +116,6 @@ def preparar_bm25_otimizado(dataset_slice):
     logger.info("Optimized BM25 prepared successfully")
     return bm25
 
-# ===== FUNÇÕES DE PROMPT (MANTIDAS IGUAIS) =====
 def montar_prompt_reflexivo(context: str, predicted_line: str, selector=None) -> str:
     logger.debug("Building reflective prompt")
     few_shot_exemplos = selector(context, predicted_line) if selector else []
@@ -174,7 +164,6 @@ def montar_prompt_verbalized(context: str, predicted_line: str, selector=None) -
 
     return final_prompt
 
-# ===== SELETORES OTIMIZADOS =====
 class SelectorManager:
     """Gerencia seletores com modelos reutilizáveis"""
     def __init__(self, dataset_slice, k_shots):
@@ -186,15 +175,15 @@ class SelectorManager:
         
     def setup_rag(self):
         if self.rag_index is None:
-            self.rag_index = preparar_index_rag_otimizado(self.dataset_slice)
+            self.rag_index = preparar_index_rag(self.dataset_slice)
     
     def setup_rag_code(self):
         if self.rag_code_index is None:
-            self.rag_code_index = preparar_index_rag_code_otimizado(self.dataset_slice)
+            self.rag_code_index = preparar_index_rag_code(self.dataset_slice)
     
     def setup_bm25(self):
         if self.bm25_model is None:
-            self.bm25_model = preparar_bm25_otimizado(self.dataset_slice)
+            self.bm25_model = preparar_bm25(self.dataset_slice)
 
     def selector_random(self, context, predicted_line):
         logger.debug(f"Using random selector with k_shots={self.k_shots}")
@@ -248,35 +237,31 @@ class SelectorManager:
             for i in I[0]
         ]
 
-# ===== AVALIAÇÃO OTIMIZADA =====
-def avaliar_verbalized_hf_otimizado(
+def avaliar_verbalized_hf(
     prompt: str,
     predicted_line: str,
     context: str,
     is_correct: bool
 ):
-    """Versão otimizada usando modelo reutilizável"""
     logger.debug("Evaluating verbalized self-ask (optimized)")
     
     tokenizer, model = model_manager.load_hf_model()
     inputs = tokenizer(prompt, return_tensors="pt").to(model_manager.device)
 
     with torch.no_grad():
-        # OTIMIZAÇÃO: Reduzido para 5 tokens max
         output = model.generate(
             inputs["input_ids"],
-            max_new_tokens=5,  # Reduzido de 10
+            max_new_tokens=5,
             return_dict_in_generate=True,
             output_scores=True,
             temperature=0.0,
             do_sample=False,
-            pad_token_id=tokenizer.eos_token_id  # Evita warnings
+            pad_token_id=tokenizer.eos_token_id
         )
 
     generated_text = tokenizer.decode(output.sequences[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     logger.debug(f"Generated: '{generated_text}'")
     
-    # Extrai valor numérico
     match = re.search(r'(\d+\.?\d*)', generated_text.strip())
     if match:
         try:
@@ -295,13 +280,12 @@ def avaliar_verbalized_hf_otimizado(
         "is_correct": is_correct
     }
 
-def avaliar_reflexao_hf_otimizado(
+def avaliar_reflexao_hf(
     prompt: str,
     predicted_line: str,
     context: str,
     is_correct: bool
 ):
-    """Versão otimizada usando modelo reutilizável"""
     logger.debug("Evaluating question answering logits (optimized)")
     
     tokenizer, model = model_manager.load_hf_model()
@@ -321,7 +305,6 @@ def avaliar_reflexao_hf_otimizado(
     generated_token = tokenizer.decode(generated_token_id).strip()
     scores = output.scores[0][0]
 
-    # Busca variações True/False
     true_variations = ["True", " True", "true", " true"]
     false_variations = ["False", " False", "false", " false"]
     
@@ -338,12 +321,10 @@ def avaliar_reflexao_hf_otimizado(
         if token_id is not None and token_id != tokenizer.unk_token_id:
             false_logprobs.append(scores[token_id].item())
 
-    # pB: Probabilidade de "True" sobre todo vocabulário
     true_id = tokenizer.convert_tokens_to_ids("True")
     all_probs = torch.softmax(scores, dim=0)
     pB = all_probs[true_id].item() if true_id is not None else 0.0
 
-    # pNB: Normalizado entre True e False
     if true_logprobs and false_logprobs:
         max_true_logprob = max(true_logprobs)
         max_false_logprob = max(false_logprobs)
@@ -365,17 +346,14 @@ def avaliar_reflexao_hf_otimizado(
         "token": generated_token
     }
 
-def avaliar_todas_metricas_otimizado(predicted_line, context, is_correct, pavg, ptot, selector=None):
-    """Versão otimizada que reutiliza modelos"""
+def avaliar_todas_metricas(predicted_line, context, is_correct, pavg, ptot, selector=None):
     logger.debug("Starting optimized comprehensive metric evaluation")
     
-    # 1. Verbalized Self-Ask (pv)
     prompt_pv = montar_prompt_verbalized(context, predicted_line, selector)
-    result_pv = avaliar_verbalized_hf_otimizado(prompt_pv, predicted_line, context, is_correct)
+    result_pv = avaliar_verbalized_hf(prompt_pv, predicted_line, context, is_correct)
     
-    # 2. Question Answering Logit (pB e pNB)
     prompt_tf = montar_prompt_reflexivo(context, predicted_line, selector)
-    result_tf = avaliar_reflexao_hf_otimizado(prompt_tf, predicted_line, context, is_correct)
+    result_tf = avaliar_reflexao_hf(prompt_tf, predicted_line, context, is_correct)
     
     return {
         "context": context,
@@ -388,7 +366,6 @@ def avaliar_todas_metricas_otimizado(predicted_line, context, is_correct, pavg, 
         "is_correct": is_correct
     }
 
-# ===== FUNÇÕES DE MÉTRICAS (MANTIDAS IGUAIS) =====
 def brier_score(y_true: List[int], y_prob: List[float]) -> float:
     return np.mean((np.array(y_prob) - np.array(y_true)) ** 2)
 
@@ -414,56 +391,16 @@ def expected_calibration_error(y_true: List[int], y_prob: List[float], n_bins: i
             ece += (bin_size / total) * abs(acc - conf)
     return ece
 
-def plot_calibration_with_hist(y_true, y_prob, n_bins=10, filename="plots_mini/calibration_plot_hist.png"):
-    logger.info(f"Generating calibration plot: {filename}")
-    y_true = np.array(y_true)
-    y_prob = np.array(y_prob)
-    bin_bounds = np.linspace(0, 1, n_bins + 1)
-
-    accs, confs, counts = [], [], []
-
-    for i in range(n_bins):
-        low, high = bin_bounds[i], bin_bounds[i+1]
-        in_bin = (y_prob >= low) & (y_prob < high)
-        if in_bin.any():
-            accs.append(np.mean(y_true[in_bin]))
-            confs.append(np.mean(y_prob[in_bin]))
-            counts.append(np.sum(in_bin))
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8), gridspec_kw={'height_ratios': [3, 1]})
-
-    ax1.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Ideal')
-    ax1.plot(confs, accs, marker='o', label='Modelo')
-    ax1.set_ylabel("Frequência real de acerto")
-    ax1.set_xticks(np.linspace(0, 1, n_bins + 1))
-    ax1.set_title("Gráfico de Calibração com Histograma")
-    ax1.grid(True)
-    ax1.legend()
-
-    bin_centers = (bin_bounds[:-1] + bin_bounds[1:]) / 2
-    ax2.bar(bin_centers, counts, width=1/n_bins, align='center', edgecolor='black')
-    ax2.set_xlabel("Confiança prevista (p_true)")
-    ax2.set_ylabel("Contagem")
-    ax2.grid(True)
-
-    plt.tight_layout()
-    plt.savefig(filename)
-    plt.close()
-    logger.info(f"Calibration plot saved to {filename}")
-
-# ===== EXECUÇÃO PRINCIPAL OTIMIZADA =====
 if __name__ == "__main__":
     logger.info("Starting optimized main execution")
 
-    file_path = "results2/dypybench_predictions_1000.json"
+    file_path = "results/deepseek_predictions.json"
     logger.info(f"Loading dataset from: {file_path}")
     
     with open(file_path, 'r', encoding='utf-8') as f:
-        full_dataset = json.load(f)
+        dataset = json.load(f)
 
-    # OTIMIZAÇÃO: Usar apenas o slice necessário
-    dataset = full_dataset[:10]
-    logger.info(f"Dataset loaded: {len(full_dataset)} total samples, using {len(dataset)} for testing")
+    logger.info(f"Dataset loaded: {len(dataset)}")
 
     k_shots = 5
     logger.info(f"k_shots set to: {k_shots}")
@@ -478,7 +415,6 @@ if __name__ == "__main__":
 
     logger.info(f"Testing {len(selectors_config)} selector configurations")
 
-    # OTIMIZAÇÃO: Loop principal com modelos reutilizáveis
     for selector_idx, (selector_name, selector_type) in enumerate(selectors_config):
         logger.info(f"\n{'='*50}")
         logger.info(f"Testing configuration {selector_idx+1}/{len(selectors_config)}: {selector_name}")
@@ -486,7 +422,6 @@ if __name__ == "__main__":
         
         current_k_shots = 0 if selector_name == "0_shot" else k_shots
         
-        # Cria gerenciador de seletores uma única vez por configuração
         if selector_type:
             selector_manager = SelectorManager(dataset, current_k_shots)
             if selector_type == "random":
@@ -502,10 +437,10 @@ if __name__ == "__main__":
         
         logger.info(f"Processing {len(dataset)} samples...")
         for i, ex in enumerate(dataset):
-            if i % 2 == 0:  # Log a cada 2 exemplos
+            if i % 2 == 0:
                 logger.info(f"Processing sample {i+1}/{len(dataset)}")
             
-            result = avaliar_todas_metricas_otimizado(
+            result = avaliar_todas_metricas(
                 predicted_line=ex["predicted_line"],
                 context=ex["context"],
                 is_correct=ex["is_correct"],
@@ -513,17 +448,31 @@ if __name__ == "__main__":
                 ptot=ex["ptot"],
                 selector=selector_func
             )
-            
             result["sample_id"] = ex.get("sample_id", i)
             all_results.append(result)
         
-        # Salva resultados
         output_filename = f"plots_mini/confidence_results_{selector_name}.json"
         logger.info(f"Saving results to: {output_filename}")
+        if os.path.exists(output_filename):
+            with open(output_filename, 'r', encoding='utf-8') as f:
+                try:
+                    existing_results = json.load(f)
+                    if not isinstance(existing_results, list):
+                        logger.warning("Existing results are not a list. Overwriting.")
+                        existing_results = []
+                except json.JSONDecodeError:
+                    logger.warning("Could not decode existing JSON. Overwriting.")
+                    existing_results = []
+        else:
+            existing_results = []
+
+        combined_results = existing_results + all_results
+
         with open(output_filename, 'w', encoding='utf-8') as f:
-            json.dump(all_results, f, indent=2, ensure_ascii=False)
+            json.dump(combined_results, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Total results now stored: {len(combined_results)}")
         
-        # Calcula métricas
         y_true = [r["is_correct"] for r in all_results]
         y_prob_pnb = [r["ask_tf_n"] for r in all_results]
         
@@ -536,16 +485,11 @@ if __name__ == "__main__":
         logger.info(f"- Skill Score: {skill:.4f}")
         logger.info(f"- Expected Calibration Error (ECE): {ece:.4f}")
         
-        # Salva métricas
         metrics_filename = f"metricas_calibracao_{selector_name}.txt"
         with open(metrics_filename, "w") as f:
             f.write(f"Brier Score: {brier:.4f}\n")
             f.write(f"Skill Score: {skill:.4f}\n")
             f.write(f"Expected Calibration Error (ECE): {ece:.4f}\n")
-        
-        # Gera gráfico
-        plot_filename = f"plots_mini/calibration_plot_{selector_name}.png"
-        plot_calibration_with_hist(y_true, y_prob_pnb, filename=plot_filename)
         
         logger.info(f"Configuration {selector_name} completed successfully")
 

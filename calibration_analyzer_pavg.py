@@ -46,7 +46,7 @@ class CalibrationMetrics:
 
 
 class ReliabilityPlotter:
-    def __init__(self, output_dir="plots"):
+    def __init__(self, output_dir="plots_temp"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
@@ -149,7 +149,7 @@ class ProbabilityCalibrator:
 
 
 class CalibrationAnalyzer:
-    def __init__(self, data_path, output_dir="plots_kfold_original_style"):
+    def __init__(self, data_path, output_dir="plots_temp"):
         self.data_path = data_path
         self.plotter = ReliabilityPlotter(output_dir)
         self.calibrator = ProbabilityCalibrator()
@@ -162,7 +162,7 @@ class CalibrationAnalyzer:
             raise FileNotFoundError(f"File '{self.data_path}' not found.")
             
         y_true = np.array([int(sample["is_correct"]) for sample in json_data])
-        y_prob_orig = np.array([sample["pavg"] for sample in json_data])
+        y_prob_orig = np.array([sample["ask_tf_n"] for sample in json_data])
         
         print(f"Total samples loaded: {len(y_true)}\n")
         return y_true, y_prob_orig
@@ -175,7 +175,7 @@ class CalibrationAnalyzer:
         print("Generating plot for uncalibrated data...")
         self.plotter.plot_reliability(
             y_true, y_prob_orig,
-            "reliability_uncalibrated.png",
+            "rag_reliability_uncalibrated.png",
             base_title, "None"
         )
 
@@ -186,7 +186,7 @@ class CalibrationAnalyzer:
         )
         self.plotter.plot_reliability(
             y_true, y_prob_iso,
-            "reliability_isotonic_kfold.png",
+            "rag_reliability_isotonic_kfold.png",
             base_title, "Isotonic"
         )
 
@@ -196,7 +196,7 @@ class CalibrationAnalyzer:
         )
         self.plotter.plot_reliability(
             y_true, y_prob_platt,
-            "reliability_platt_kfold.png",
+            "rag_reliability_platt_kfold.png",
             base_title, "Platt"
         )
 
@@ -204,7 +204,7 @@ class CalibrationAnalyzer:
 
 
 def main():
-    analyzer = CalibrationAnalyzer("results/dypybench_predictions_deepseek.json")
+    analyzer = CalibrationAnalyzer("plots_mini/confidence_results_rag.json")
     analyzer.run_analysis()
 
 
